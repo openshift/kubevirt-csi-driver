@@ -13,11 +13,10 @@
 #See the License for the specific language governing permissions and
 #limitations under the License.
 set -e
-export KUBEVIRT_PROVIDER=k8s-1.23
 export TENANT_CLUSTER_NAME=${TENANT_CLUSTER_NAME:-kvcluster}
 export TENANT_CLUSTER_NAMESPACE=${TENANT_CLUSTER_NAMESPACE:-kvcluster}
-export KUBEVIRTCI_TAG=${KUBEVIRTCI_TAG:-2205231118-f12b50e}
-export KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER:-k8s-1.23}
+export KUBEVIRTCI_TAG=${KUBEVIRTCI_TAG:-2301240001-e641e98}
+export KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER:-k8s-1.25}
 
 test_pod=${TENANT_CLUSTER_NAME}-k8s-e2e-suite-runnner
 test_driver_cm=${TENANT_CLUSTER_NAME}-test-driver
@@ -74,6 +73,14 @@ spec:
   containers:
   - name: test-suite
     image: registry.access.redhat.com/ubi8/ubi:8.0
+    securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      runAsUser: 1000
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: "RuntimeDefault"
     env:
     - name: KUBECONFIG
       value: /etc/kubernetes/kubeconfig/value
@@ -87,6 +94,7 @@ spec:
     - /bin/bash
     - -c
     - |
+      cd /tmp
       curl --location https://dl.k8s.io/v1.22.0/kubernetes-test-linux-amd64.tar.gz |   tar --strip-components=3 -zxf - kubernetes/test/bin/e2e.test kubernetes/test/bin/ginkgo
       chmod +x e2e.test
       curl -LO "https://dl.k8s.io/release/v1.22.0/bin/linux/amd64/kubectl"
@@ -121,11 +129,18 @@ spec:
 EOF
 }
 
+function patch_local_storage_profile() {
+if ./kubevirtci kubectl get storageprofile local; then
+  ./kubevirtci kubectl patch storageprofile local --type='merge' -p '{"spec":{"claimPropertySets":[{"accessModes":["ReadWriteOnce"], "volumeMode": "Filesystem"}]}}'
+fi
+}
+
 trap cleanup EXIT SIGSTOP SIGKILL SIGTERM
 ensure_cluster_up
 ensure_synced
 create_test_driver_cm
 create_capk_secret
+patch_local_storage_profile
 start_test_pod
 # Wait for pod to be ready before getting logs
 ./kubevirtci kubectl wait pods -n $TENANT_CLUSTER_NAMESPACE ${test_pod} --for condition=Ready --timeout=180s
