@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -18,6 +19,7 @@ import (
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	client "kubevirt.io/csi-driver/pkg/kubevirt"
+	"kubevirt.io/csi-driver/pkg/util"
 )
 
 const (
@@ -27,16 +29,31 @@ const (
 	serialParameter                = "serial"
 )
 
+var (
+	unallowedStorageClass = status.Error(codes.InvalidArgument, "infraStorageclass is not in the allowed list")
+)
+
 //ControllerService implements the controller interface. See README for details.
 type ControllerService struct {
-	virtClient            client.Client
-	infraClusterNamespace string
-	infraClusterLabels    map[string]string
+	virtClient              client.Client
+	infraClusterNamespace   string
+	infraClusterLabels      map[string]string
+	storageClassEnforcement util.StorageClassEnforcement
 }
 
 var controllerCaps = []csi.ControllerServiceCapability_RPC_Type{
 	csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
 	csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME, // attach/detach
+}
+
+// Contains tells whether a contains x.
+func contains(arr []string, val string) bool {
+	for _, itrVal := range arr {
+		if val == itrVal {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *ControllerService) validateCreateVolumeRequest(req *csi.CreateVolumeRequest) error {
@@ -50,6 +67,22 @@ func (c *ControllerService) validateCreateVolumeRequest(req *csi.CreateVolumeReq
 	caps := req.GetVolumeCapabilities()
 	if caps == nil {
 		return status.Error(codes.InvalidArgument, "volume capabilities missing in request")
+	}
+
+	if c.storageClassEnforcement.AllowAll {
+		return nil
+	}
+
+	storageClassName := req.Parameters[infraStorageClassNameParameter]
+	if storageClassName == "" {
+		if c.storageClassEnforcement.AllowDefault {
+			return nil
+		} else {
+			return unallowedStorageClass
+		}
+	}
+	if !contains(c.storageClassEnforcement.AllowList, storageClassName) {
+		return unallowedStorageClass
 	}
 
 	return nil
@@ -68,10 +101,6 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 
 	// Prepare parameters for the DataVolume
 	storageClassName := req.Parameters[infraStorageClassNameParameter]
-	volumeMode := getVolumeModeFromRequest(req)
-	if volumeMode == corev1.PersistentVolumeBlock {
-		return nil, status.Error(codes.InvalidArgument, "block mode not supported")
-	}
 	storageSize := req.GetCapacityRange().GetRequiredBytes()
 	dvName := req.Name
 	value, ok := req.Parameters[busParameter]
@@ -92,9 +121,7 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 	dv.ObjectMeta.Annotations = map[string]string{
 		"cdi.kubevirt.io/storage.deleteAfterCompletion": "false",
 	}
-	dv.Spec.PVC = &corev1.PersistentVolumeClaimSpec{
-		AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-		VolumeMode:  &volumeMode,
+	dv.Spec.Storage = &cdiv1.StorageSpec{
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceStorage: *resource.NewScaledQuantity(storageSize, 0)},
@@ -105,7 +132,7 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 	// default storage class which means leaving the storageclass empty
 	// (nil) on the PVC
 	if storageClassName != "" {
-		dv.Spec.PVC.StorageClassName = &storageClassName
+		dv.Spec.Storage.StorageClassName = &storageClassName
 	}
 
 	dv.Spec.Source = &cdiv1.DataVolumeSource{}
@@ -115,16 +142,16 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 		// Create DataVolume
 		dv, err = c.virtClient.CreateDataVolume(c.infraClusterNamespace, dv)
 		if err != nil {
-			klog.Error("Failed creating DataVolume " + dvName)
+			klog.Error("failed creating DataVolume " + dvName)
 			return nil, err
 		}
 	} else if err != nil {
 		return nil, err
 	} else {
-		if existingDv != nil && existingDv.Spec.PVC != nil {
+		if existingDv != nil && existingDv.Spec.Storage != nil {
 			// Verify capacity of original matches requested size.
-			existingRequest := existingDv.Spec.PVC.Resources.Requests[corev1.ResourceStorage]
-			newRequest := dv.Spec.PVC.Resources.Requests[corev1.ResourceStorage]
+			existingRequest := existingDv.Spec.Storage.Resources.Requests[corev1.ResourceStorage]
+			newRequest := dv.Spec.Storage.Resources.Requests[corev1.ResourceStorage]
 			if newRequest.Cmp(existingRequest) != 0 {
 				return nil, status.Error(codes.AlreadyExists, "Requested storage size does not match existing size")
 			}
@@ -172,7 +199,7 @@ func (c *ControllerService) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 
 	err := c.virtClient.DeleteDataVolume(c.infraClusterNamespace, dvName)
 	if err != nil {
-		klog.Error("Failed deleting DataVolume " + dvName)
+		klog.Error("failed deleting DataVolume " + dvName)
 		return nil, err
 	}
 
@@ -209,7 +236,7 @@ func (c *ControllerService) ControllerPublishVolume(
 	// Get VM name
 	vmName, err := c.getVMNameByCSINodeID(req.NodeId)
 	if err != nil {
-		klog.Error("Failed getting VM Name for node ID " + req.NodeId)
+		klog.Error("failed getting VM Name for node ID " + req.NodeId)
 		return nil, err
 	}
 
@@ -239,9 +266,28 @@ func (c *ControllerService) ControllerPublishVolume(
 		},
 	}
 
-	err = c.virtClient.AddVolumeToVM(c.infraClusterNamespace, vmName, addVolumeOptions)
+	volumeFound := false
+	vm, err := c.virtClient.GetVirtualMachine(c.infraClusterNamespace, vmName)
 	if err != nil {
-		klog.Errorf("Failed adding volume %s to VM %s, %v", dvName, vmName, err)
+		return nil, err
+	}
+	for _, volumeStatus := range vm.Status.VolumeStatus {
+		if volumeStatus.Name == dvName {
+			volumeFound = true
+			break
+		}
+	}
+	if !volumeFound {
+		err = c.virtClient.AddVolumeToVM(c.infraClusterNamespace, vmName, addVolumeOptions)
+		if err != nil {
+			klog.Errorf("failed adding volume %s to VM %s, %v", dvName, vmName, err)
+			return nil, err
+		}
+	}
+
+	err = c.virtClient.EnsureVolumeAvailable(c.infraClusterNamespace, vmName, dvName, time.Minute*2)
+	if err != nil {
+		klog.Errorf("volume %s failed to be ready in time in VM %s, %v", dvName, vmName, err)
 		return nil, err
 	}
 
@@ -279,7 +325,7 @@ func (c *ControllerService) ControllerUnpublishVolume(ctx context.Context, req *
 	// Detach DataVolume from VM
 	err = c.virtClient.RemoveVolumeFromVM(c.infraClusterNamespace, vmName, &kubevirtv1.RemoveVolumeOptions{Name: dvName})
 	if err != nil {
-		klog.Error("Failed removing volume " + dvName + " from VM " + vmName)
+		klog.Error("failed removing volume " + dvName + " from VM " + vmName)
 		return nil, err
 	}
 
@@ -376,7 +422,7 @@ func (c *ControllerService) ControllerGetVolume(_ context.Context, _ *csi.Contro
 func (c *ControllerService) getVMNameByCSINodeID(nodeID string) (string, error) {
 	list, err := c.virtClient.ListVirtualMachines(c.infraClusterNamespace)
 	if err != nil {
-		klog.Error("Failed listing VMIs in infra cluster")
+		klog.Error("failed listing VMIs in infra cluster")
 		return "", status.Error(codes.NotFound, fmt.Sprintf("failed listing VMIs in infra cluster %v", err))
 	}
 
@@ -387,21 +433,4 @@ func (c *ControllerService) getVMNameByCSINodeID(nodeID string) (string, error) 
 	}
 
 	return "", status.Error(codes.NotFound, fmt.Sprintf("failed to find VM with domain.firmware.uuid %v", nodeID))
-}
-
-func getVolumeModeFromRequest(req *csi.CreateVolumeRequest) corev1.PersistentVolumeMode {
-	volumeMode := corev1.PersistentVolumeFilesystem // Set default in case not found in request
-
-	for _, cap := range req.VolumeCapabilities {
-		if cap == nil {
-			continue
-		}
-
-		if _, ok := cap.GetAccessType().(*csi.VolumeCapability_Block); ok {
-			volumeMode = corev1.PersistentVolumeBlock
-			break
-		}
-	}
-
-	return volumeMode
 }
