@@ -2,7 +2,7 @@ StorageClass:
   FromName: false
   FromExistingClassName: kubevirt
 SnapshotClass:
-  FromName: true
+  FromName: false
 DriverInfo:
   Name: csi.kubevirt.io
   Capabilities:
@@ -14,7 +14,7 @@ DriverInfo:
     nodeExpansion: false
     persistence: true
     singleNodeVolume: false
-    snapshotDataSource: true
+    snapshotDataSource: false
     topology: false
     capacity: false
   SupportedFsType:
