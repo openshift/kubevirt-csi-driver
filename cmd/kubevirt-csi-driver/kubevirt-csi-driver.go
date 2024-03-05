@@ -4,10 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"math/rand"
 	"os"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v2"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,30 +35,11 @@ var (
 )
 
 func init() {
-	err := flag.Set("logtostderr", "true")
-	if err != nil {
-		panic(fmt.Sprintf("can't set the logtostderr flags; %s", err.Error()))
-	}
-	// make glog and klog coexist
-	klogFlags := flag.NewFlagSet("klog", flag.ExitOnError)
-	klog.InitFlags(klogFlags)
-
-	// Sync the glog and klog flags.
-	flag.CommandLine.Visit(func(f1 *flag.Flag) {
-		f2 := klogFlags.Lookup(f1.Name)
-		if f2 != nil {
-			value := f1.Value.String()
-			err = f2.Value.Set(value)
-			if err != nil {
-				panic(fmt.Sprintf("can't set the %s flags; %s", f1.Name, err.Error()))
-			}
-		}
-	})
+	klog.InitFlags(nil)
 }
 
 func main() {
 	flag.Parse()
-	rand.Seed(time.Now().UnixNano())
 	handle()
 	os.Exit(0)
 }
@@ -71,7 +50,7 @@ func handle() {
 	var identityClientset *kubernetes.Clientset
 
 	if service.VendorVersion == "" {
-		klog.Fatalf("VendorVersion must be set at compile time")
+		klog.Fatal("VendorVersion must be set at compile time")
 	}
 	klog.V(2).Infof("Driver vendor %v %v", service.VendorName, service.VendorVersion)
 
@@ -104,7 +83,10 @@ func handle() {
 		klog.Fatalf("Failed to build tenant client set: %v", err)
 	}
 
-	virtClient, err := kubevirt.NewClient(infraRestConfig)
+	infraClusterLabelsMap := parseLabels()
+	storageClassEnforcement := configureStorageClassEnforcement(infraStorageClassEnforcement)
+
+	virtClient, err := kubevirt.NewClient(infraRestConfig, infraClusterLabelsMap, storageClassEnforcement)
 	if err != nil {
 		klog.Fatal(err)
 	}
@@ -128,21 +110,6 @@ func handle() {
 		}
 	}
 
-	infraClusterLabelsMap := parseLabels()
-	var storageClassEnforcement util.StorageClassEnforcement
-	//prase yaml
-	if infraStorageClassEnforcement == "" {
-		storageClassEnforcement = util.StorageClassEnforcement{
-			AllowAll:     true,
-			AllowDefault: true,
-		}
-	} else {
-		err := yaml.Unmarshal([]byte(infraStorageClassEnforcement), &storageClassEnforcement)
-		if err != nil {
-			klog.Fatalf("Failed to parse infra-storage-class-enforcement", err)
-		}
-	}
-
 	driver := service.NewKubevirtCSIDriver(virtClient,
 		identityClientset,
 		*infraClusterNamespace,
@@ -153,6 +120,24 @@ func handle() {
 		*runControllerService)
 
 	driver.Run(*endpoint)
+}
+
+func configureStorageClassEnforcement(infraStorageClassEnforcement string) util.StorageClassEnforcement {
+	var storageClassEnforcement util.StorageClassEnforcement
+
+	if infraStorageClassEnforcement == "" {
+		storageClassEnforcement = util.StorageClassEnforcement{
+			AllowAll:     true,
+			AllowDefault: true,
+		}
+	} else {
+		//parse yaml
+		err := yaml.Unmarshal([]byte(infraStorageClassEnforcement), &storageClassEnforcement)
+		if err != nil {
+			klog.Fatalf("Failed to parse infra-storage-class-enforcement %v", err)
+		}
+	}
+	return storageClassEnforcement
 }
 
 func parseLabels() map[string]string {

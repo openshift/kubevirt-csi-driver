@@ -5,12 +5,14 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
+
+	"k8s.io/client-go/tools/clientcmd"
+	kubecli "kubevirt.io/csi-driver/pkg/generated/kubevirt/client-go/clientset/versioned"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -20,10 +22,26 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/kubernetes"
-	"kubevirt.io/client-go/kubecli"
 )
 
-var virtClient kubecli.KubevirtClient
+var virtClient *kubecli.Clientset
+
+func defaultInfraClientConfig(flags *pflag.FlagSet) clientcmd.ClientConfig {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	loadingRules.DefaultClientConfig = &clientcmd.DefaultClientConfig
+
+	flags.StringVar(&loadingRules.ExplicitPath, "infra-kubeconfig", "", "Path to the kubeconfig file to use for CLI requests.")
+
+	overrides := &clientcmd.ConfigOverrides{ClusterDefaults: clientcmd.ClusterDefaults}
+
+	flagNames := clientcmd.RecommendedConfigOverrideFlags("")
+	flagNames.ClusterOverrideFlags.APIServer.ShortName = "s"
+
+	clientcmd.BindOverrideFlags(overrides, flags, flagNames)
+	clientConfig := clientcmd.NewInteractiveDeferredLoadingClientConfig(loadingRules, overrides, os.Stdin)
+
+	return clientConfig
+}
 
 var _ = Describe("CreatePVC", func() {
 
@@ -32,39 +50,23 @@ var _ = Describe("CreatePVC", func() {
 	var tmpDir string
 	var tenantClient *kubernetes.Clientset
 	var infraClient *kubernetes.Clientset
-	var tenantKubeconfigFile string
-	var tenantAccessor tenantClusterAccess
+	var tenantAccessor *tenantClusterAccess
 	var namespace string
 
 	BeforeEach(func() {
-		var err error
-
-		if len(TenantKubeConfig) == 0 {
-			tmpDir, err = os.MkdirTemp(WorkingDir, "pvc-creation-tests")
-			Expect(err).ToNot(HaveOccurred())
-
-			tenantKubeconfigFile = filepath.Join(tmpDir, "tenant-kubeconfig.yaml")
-
-			clientConfig := kubecli.DefaultClientConfig(&pflag.FlagSet{})
-			virtClient, err = kubecli.GetKubevirtClientFromClientConfig(clientConfig)
-			Expect(err).ToNot(HaveOccurred())
-
-			tenantAccessor = newTenantClusterAccess("kvcluster", tenantKubeconfigFile)
-
-			err = tenantAccessor.startForwardingTenantAPI()
-			Expect(err).ToNot(HaveOccurred())
-		} else {
-			tenantAccessor = newTenantClusterAccess(InfraClusterNamespace, TenantKubeConfig)
-		}
-		tenantClient, err = tenantAccessor.generateClient()
+		tmpDir, err := os.MkdirTemp(WorkingDir, "pvc-creation-tests")
 		Expect(err).ToNot(HaveOccurred())
-
 		namespace = "e2e-test-create-pvc-" + rand.String(6)
+
+		tenantAccessor = createTenantAccessor(namespace, tmpDir)
 		ns := &k8sv1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: namespace,
 			},
 		}
+
+		tenantClient, err = tenantAccessor.generateTenantClient()
+		Expect(err).ToNot(HaveOccurred())
 
 		infraClient, err = generateInfraClient()
 		Expect(err).ToNot(HaveOccurred())
@@ -75,9 +77,7 @@ var _ = Describe("CreatePVC", func() {
 
 	AfterEach(func() {
 		_ = tenantClient.CoreV1().Namespaces().Delete(context.Background(), namespace, metav1.DeleteOptions{})
-		if len(TenantKubeConfig) == 0 {
-			_ = tenantAccessor.stopForwardingTenantAPI()
-		}
+		_ = tenantAccessor.stopForwardingTenantAPI()
 		_ = os.RemoveAll(tmpDir)
 	})
 
@@ -355,11 +355,18 @@ func podWithoutPVCSpec(podName string, cmd, args []string) *k8sv1.Pod {
 				},
 			},
 			// add toleration so we can use control node for tests
-			Tolerations: []k8sv1.Toleration{{
-				Key:      "node-role.kubernetes.io/master",
-				Operator: k8sv1.TolerationOpExists,
-				Effect:   k8sv1.TaintEffectNoSchedule,
-			}},
+			Tolerations: []k8sv1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: k8sv1.TolerationOpExists,
+					Effect:   k8sv1.TaintEffectNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/control-plane",
+					Operator: k8sv1.TolerationOpExists,
+					Effect:   k8sv1.TaintEffectNoSchedule,
+				},
+			},
 		},
 	}
 }

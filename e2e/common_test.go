@@ -2,23 +2,26 @@ package e2e_test
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 
-	"github.com/golang/glog"
 	. "github.com/onsi/gomega"
-	kubevirtv1 "kubevirt.io/api/core/v1"
+	"github.com/spf13/pflag"
+	snapcli "kubevirt.io/csi-driver/pkg/generated/external-snapshotter/client-go/clientset/versioned"
+	kubecli "kubevirt.io/csi-driver/pkg/generated/kubevirt/client-go/clientset/versioned"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/klog/v2"
 )
 
 // RunCmd function executes a command, and returns STDOUT and STDERR bytes
@@ -42,40 +45,61 @@ type tenantClusterAccess struct {
 	namespace            string
 	tenantKubeconfigFile string
 	isForwarding         bool
+	tenantApiport        int
+	tenantRestConfig     *rest.Config
 }
 
-func newTenantClusterAccess(namespace string, tenantKubeconfigFile string) tenantClusterAccess {
+func newTenantClusterAccess(namespace, tenantKubeconfigFile string, apiPort int) tenantClusterAccess {
 	return tenantClusterAccess{
 		namespace:            namespace,
 		tenantKubeconfigFile: tenantKubeconfigFile,
+		tenantApiport:        apiPort,
 	}
 }
 
-func (t *tenantClusterAccess) generateClient() (*kubernetes.Clientset, error) {
-	overrides := &clientcmd.ConfigOverrides{}
-	if _, err := os.Stat(t.tenantKubeconfigFile); errors.Is(err, os.ErrNotExist) {
-		localPort := t.listener.Addr().(*net.TCPAddr).Port
-		cmd := exec.Command(ClusterctlPath, "get", "kubeconfig", "kvcluster",
-			"--namespace", t.namespace)
-		stdout, _ := RunCmd(cmd)
-		if err := os.WriteFile(t.tenantKubeconfigFile, stdout, 0644); err != nil {
+func (t *tenantClusterAccess) GetTenantRestConfig() (*rest.Config, error) {
+	if t.tenantRestConfig == nil {
+		overrides := &clientcmd.ConfigOverrides{}
+		if _, err := os.Stat(t.tenantKubeconfigFile); errors.Is(err, os.ErrNotExist) {
+			localPort := t.listener.Addr().(*net.TCPAddr).Port
+			cmd := exec.Command(ClusterctlPath, "get", "kubeconfig", "kvcluster",
+				"--namespace", t.namespace)
+			stdout, _ := RunCmd(cmd)
+			if err := os.WriteFile(t.tenantKubeconfigFile, stdout, 0644); err != nil {
+				return nil, err
+			}
+			overrides = &clientcmd.ConfigOverrides{
+				ClusterInfo: clientcmdapi.Cluster{
+					Server:                fmt.Sprintf("https://127.0.0.1:%d", localPort),
+					InsecureSkipTLSVerify: true,
+				},
+			}
+		}
+		clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			&clientcmd.ClientConfigLoadingRules{ExplicitPath: t.tenantKubeconfigFile}, overrides)
+		var err error
+		t.tenantRestConfig, err = clientConfig.ClientConfig()
+		if err != nil {
 			return nil, err
 		}
-		overrides = &clientcmd.ConfigOverrides{
-			ClusterInfo: clientcmdapi.Cluster{
-				Server:                fmt.Sprintf("https://127.0.0.1:%d", localPort),
-				InsecureSkipTLSVerify: true,
-			},
-		}
 	}
-	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		&clientcmd.ClientConfigLoadingRules{ExplicitPath: t.tenantKubeconfigFile}, overrides)
-	restConfig, err := clientConfig.ClientConfig()
+	return t.tenantRestConfig, nil
+}
+
+func (t *tenantClusterAccess) generateTenantClient() (*kubernetes.Clientset, error) {
+	restConfig, err := t.GetTenantRestConfig()
 	if err != nil {
 		return nil, err
 	}
-
 	return kubernetes.NewForConfig(restConfig)
+}
+
+func (t *tenantClusterAccess) generateTenantSnapshotClient() (*snapcli.Clientset, error) {
+	restConfig, err := t.GetTenantRestConfig()
+	if err != nil {
+		return nil, err
+	}
+	return snapcli.NewForConfig(restConfig)
 }
 
 func (t *tenantClusterAccess) startForwardingTenantAPI() error {
@@ -96,34 +120,10 @@ func (t *tenantClusterAccess) startForwardingTenantAPI() error {
 		return err
 	}
 
-	vmiName, err := t.findControlPlaneVMIName()
-	if err != nil {
-		return err
-	}
-
 	t.isForwarding = true
-	go t.waitForConnection(vmiName, t.namespace)
+	go t.waitForConnection()
 
 	return nil
-}
-
-func (t *tenantClusterAccess) findControlPlaneVMIName() (string, error) {
-	vmiList, err := virtClient.VirtualMachineInstance(t.namespace).List(context.TODO(), &metav1.ListOptions{})
-	if err != nil {
-		return "", err
-	}
-
-	var chosenVMI *kubevirtv1.VirtualMachineInstance
-	for _, vmi := range vmiList.Items {
-		if strings.Contains(vmi.Name, "-control-plane") {
-			chosenVMI = &vmi
-			break
-		}
-	}
-	if chosenVMI == nil {
-		return "", fmt.Errorf("Couldn't find controlplane vmi in namespace %s", t.namespace)
-	}
-	return chosenVMI.Name, nil
 }
 
 func (t *tenantClusterAccess) stopForwardingTenantAPI() error {
@@ -134,25 +134,24 @@ func (t *tenantClusterAccess) stopForwardingTenantAPI() error {
 	return t.listener.Close()
 }
 
-func (t *tenantClusterAccess) waitForConnection(name, namespace string) {
-	for {
-		conn, err := t.listener.Accept()
-		if err != nil {
-			glog.Errorln("error accepting connection:", err)
-			return
-		}
-		stream, err := virtClient.VirtualMachineInstance(namespace).PortForward(name, 6443, "tcp")
-		if err != nil {
-			glog.Errorf("can't access vmi %s/%s: %v", namespace, name, err)
-			return
-		}
-		go t.handleConnection(conn, stream.AsConn())
+func (t *tenantClusterAccess) waitForConnection() {
+	conn, err := t.listener.Accept()
+	if err != nil {
+		klog.Errorln("error accepting connection:", err)
+		return
 	}
+
+	proxy, err := net.Dial("tcp", net.JoinHostPort("localhost", strconv.Itoa(t.tenantApiport)))
+	if err != nil {
+		klog.Errorf("unable to connect to local port-forward: %v", err)
+		return
+	}
+	go t.handleConnection(conn, proxy)
 }
 
 // handleConnection copies data between the local connection and the stream to
-// the remote server.
-func (t *tenantClusterAccess) handleConnection(local, remote net.Conn) {
+// the remote server. It closes the local and remote connections when done.
+func (t *tenantClusterAccess) handleConnection(local, remote io.ReadWriteCloser) {
 	defer local.Close()
 	defer remote.Close()
 	errs := make(chan error, 2)
@@ -170,17 +169,56 @@ func (t *tenantClusterAccess) handleConnection(local, remote net.Conn) {
 
 func (t *tenantClusterAccess) handleConnectionError(err error) {
 	if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-		glog.Errorf("error handling portForward connection: %v", err)
+		klog.Errorf("error handling portForward connection: %v", err)
 	}
 }
 
-func generateInfraClient() (*kubernetes.Clientset, error) {
+func generateInfraRestConfig() (*rest.Config, error) {
 	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		&clientcmd.ClientConfigLoadingRules{ExplicitPath: InfraKubeConfig}, &clientcmd.ConfigOverrides{})
 	restConfig, err := clientConfig.ClientConfig()
 	if err != nil {
 		return nil, err
 	}
+	return restConfig, nil
+}
+
+func generateInfraClient() (*kubernetes.Clientset, error) {
+	restConfig, err := generateInfraRestConfig()
+	if err != nil {
+		return nil, err
+	}
 
 	return kubernetes.NewForConfig(restConfig)
+}
+
+func generateInfraSnapClient() (*snapcli.Clientset, error) {
+	restConfig, err := generateInfraRestConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	return snapcli.NewForConfig(restConfig)
+}
+
+func createTenantAccessor(namespace, tmpDir string) *tenantClusterAccess {
+	var tenantAccessor tenantClusterAccess
+	if len(TenantKubeConfig) == 0 {
+		infraKubeconfigFile := filepath.Join(tmpDir, "infra-kubeconfig.yaml")
+
+		clientConfig := defaultInfraClientConfig(&pflag.FlagSet{})
+		cfg, err := clientConfig.ClientConfig()
+		Expect(err).ToNot(HaveOccurred())
+		virtClient = kubecli.NewForConfigOrDie(cfg)
+		Expect(err).ToNot(HaveOccurred())
+
+		tenantAccessor = newTenantClusterAccess("kvcluster", infraKubeconfigFile, tenantApiPort)
+
+		err = tenantAccessor.startForwardingTenantAPI()
+		Expect(err).ToNot(HaveOccurred())
+	} else {
+		tenantAccessor = newTenantClusterAccess(InfraClusterNamespace, TenantKubeConfig, tenantApiPort)
+	}
+
+	return &tenantAccessor
 }
