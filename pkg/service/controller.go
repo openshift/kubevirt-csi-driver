@@ -231,6 +231,11 @@ func (c *ControllerService) ControllerPublishVolume(
 		return nil, err
 	}
 	dvName := req.GetVolumeId()
+	if _, err := c.virtClient.GetDataVolume(c.infraClusterNamespace, dvName); errors.IsNotFound(err) {
+		return nil, status.Errorf(codes.NotFound, "volume %s not found", req.GetVolumeId())
+	} else if err != nil {
+		return nil, err
+	}
 
 	klog.V(3).Infof("Attaching DataVolume %s to Node ID %s", dvName, req.NodeId)
 
