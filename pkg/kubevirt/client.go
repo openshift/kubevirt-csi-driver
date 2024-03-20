@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	kubevirtv1 "kubevirt.io/api/core/v1"
+	cdicli "kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned"
 	"kubevirt.io/client-go/kubecli"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 )
@@ -37,8 +38,9 @@ type Client interface {
 }
 
 type client struct {
-	kubernetesClient *kubernetes.Clientset
+	kubernetesClient kubernetes.Interface
 	virtClient       kubecli.KubevirtClient
+	cdiClient        cdicli.Interface
 	infraLabelMap    map[string]string
 	volumePrefix     string
 }
@@ -57,7 +59,12 @@ func NewClient(config *rest.Config, infraClusterLabelMap map[string]string, pref
 	if err != nil {
 		return nil, err
 	}
+	cdiClient, err := cdicli.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
 	result.virtClient = kubevirtClient
+	result.cdiClient = cdiClient
 	result.infraLabelMap = infraClusterLabelMap
 	result.volumePrefix = fmt.Sprintf("%s-", prefix)
 	return result, nil
@@ -135,13 +142,13 @@ func (c *client) CreateDataVolume(namespace string, dataVolume *cdiv1.DataVolume
 	if !strings.HasPrefix(dataVolume.GetName(), c.volumePrefix) {
 		return nil, ErrInvalidVolume
 	} else {
-		return c.virtClient.CdiClient().CdiV1beta1().DataVolumes(namespace).Create(context.TODO(), dataVolume, metav1.CreateOptions{})
+		return c.cdiClient.CdiV1beta1().DataVolumes(namespace).Create(context.TODO(), dataVolume, metav1.CreateOptions{})
 	}
 }
 
 // Ping performs a minimal request to the infra-cluster k8s api
 func (c *client) Ping(ctx context.Context) error {
-	_, err := c.kubernetesClient.ServerVersion()
+	_, err := c.kubernetesClient.Discovery().ServerVersion()
 	return err
 }
 
@@ -152,13 +159,13 @@ func (c *client) DeleteDataVolume(namespace string, name string) error {
 	} else if err != nil {
 		return err
 	} else if dv != nil {
-		return c.virtClient.CdiClient().CdiV1beta1().DataVolumes(namespace).Delete(context.TODO(), dv.Name, metav1.DeleteOptions{})
+		return c.cdiClient.CdiV1beta1().DataVolumes(namespace).Delete(context.TODO(), dv.Name, metav1.DeleteOptions{})
 	}
 	return nil
 }
 
 func (c *client) GetDataVolume(namespace string, name string) (*cdiv1.DataVolume, error) {
-	dv, err := c.virtClient.CdiClient().CdiV1beta1().DataVolumes(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	dv, err := c.cdiClient.CdiV1beta1().DataVolumes(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
