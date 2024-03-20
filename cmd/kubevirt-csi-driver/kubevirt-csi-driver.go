@@ -27,6 +27,7 @@ var (
 	infraClusterNamespace  = flag.String("infra-cluster-namespace", "", "The infra-cluster namespace")
 	infraClusterKubeconfig = flag.String("infra-cluster-kubeconfig", "", "the infra-cluster kubeconfig file. If not set, defaults to in cluster config.")
 	infraClusterLabels     = flag.String("infra-cluster-labels", "", "The infra-cluster labels to use when creating resources in infra cluster. 'name=value' fields separated by a comma")
+	volumePrefix           = flag.String("volume-prefix", "pvc", "The prefix expected for persistent volumes")
 	// infraStorageClassEnforcement = flag.String("infra-storage-class-enforcement", "", "A string encoded yaml that represents the policy of enforcing which infra storage classes are allowed in persistentVolume of type kubevirt")
 	infraStorageClassEnforcement = os.Getenv("INFRA_STORAGE_CLASS_ENFORCEMENT")
 
@@ -75,6 +76,13 @@ func handle() {
 	}
 	klog.V(2).Infof("Driver vendor %v %v", service.VendorName, service.VendorVersion)
 
+	if (infraClusterLabels == nil || *infraClusterLabels == "") && !*runNodeService {
+		klog.Fatal("infra-cluster-labels must be set")
+	}
+	if volumePrefix == nil || *volumePrefix == "" {
+		klog.Fatal("volume-prefix must be set")
+	}
+
 	inClusterConfig, err := rest.InClusterConfig()
 	if err != nil {
 		klog.Fatalf("Failed to build in cluster config: %v", err)
@@ -104,7 +112,9 @@ func handle() {
 		klog.Fatalf("Failed to build tenant client set: %v", err)
 	}
 
-	virtClient, err := kubevirt.NewClient(infraRestConfig)
+	infraClusterLabelsMap := parseLabels()
+
+	virtClient, err := kubevirt.NewClient(infraRestConfig, infraClusterLabelsMap, *volumePrefix)
 	if err != nil {
 		klog.Fatal(err)
 	}
@@ -128,7 +138,6 @@ func handle() {
 		}
 	}
 
-	infraClusterLabelsMap := parseLabels()
 	var storageClassEnforcement util.StorageClassEnforcement
 	//prase yaml
 	if infraStorageClassEnforcement == "" {
