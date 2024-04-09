@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -111,8 +112,15 @@ func TestDeleteVolume_Fail(t *testing.T) {
 func TestPublishVolume_Success(t *testing.T) {
 	client := &ControllerClientMock{t: t}
 	controller := ControllerService{client, testInfraNamespace, testInfraLabels, storageClassEnforcement}
-
-	_, err := controller.ControllerPublishVolume(context.TODO(), getPublishVolumeRequest()) // AddVolumeToVM tests the hotplug request
+	req := getPublishVolumeRequest()
+	dv := &cdiv1.DataVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testInfraNamespace,
+			Name:      req.VolumeId,
+		},
+	}
+	client.datavolumes = map[string]*cdiv1.DataVolume{getKey(dv.Namespace, dv.Name): dv}
+	_, err := controller.ControllerPublishVolume(context.TODO(), req) // AddVolumeToVM tests the hotplug request
 	assert.Nil(t, err)
 }
 
@@ -232,6 +240,7 @@ type ControllerClientMock struct {
 	FailAddVolumeToVM       bool
 	FailRemoveVolumeFromVM  bool
 	virtualMachineStatus    kubevirtv1.VirtualMachineInstanceStatus
+	datavolumes             map[string]*cdiv1.DataVolume
 
 	t *testing.T
 }
@@ -326,7 +335,11 @@ func (c *ControllerClientMock) CreateDataVolume(namespace string, dataVolume *cd
 	return result, nil
 }
 func (c *ControllerClientMock) GetDataVolume(namespace string, name string) (*cdiv1.DataVolume, error) {
-	return nil, k8serrors.NewNotFound(cdiv1.Resource("DataVolume"), name)
+	dv, ok := c.datavolumes[getKey(namespace, name)]
+	if !ok {
+		return nil, k8serrors.NewNotFound(cdiv1.Resource("DataVolume"), name)
+	}
+	return dv, nil
 }
 func (c *ControllerClientMock) ListDataVolumes(namespace string) ([]cdiv1.DataVolume, error) {
 	return nil, errors.New("Not implemented")
@@ -366,4 +379,8 @@ func (c *ControllerClientMock) EnsureVolumeAvailable(namespace, vmName, volumeNa
 
 func (c *ControllerClientMock) EnsureVolumeRemoved(namespace, vmName, volumeName string, timeout time.Duration) error {
 	return nil
+}
+
+func getKey(namespace, name string) string {
+	return fmt.Sprintf("%s/%s", namespace, name)
 }
