@@ -16,27 +16,34 @@ import (
 	"k8s.io/utils/ptr"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 	cdicli "kubevirt.io/csi-driver/pkg/generated/containerized-data-importer/client-go/clientset/versioned/fake"
+	snapcli "kubevirt.io/csi-driver/pkg/generated/external-snapshotter/client-go/clientset/versioned"
 	snapfake "kubevirt.io/csi-driver/pkg/generated/external-snapshotter/client-go/clientset/versioned/fake"
 	"kubevirt.io/csi-driver/pkg/util"
 )
 
 const (
-	defaultStorageClassName      = "default-storage-class"
-	storageClassName             = "test-storage-class"
-	volumeSnapshotClassName      = "test-volume-snapshot-class"
-	provisioner                  = "test-provisioner"
-	nonMatchingProvisioner       = "non-matching-provisioner-snapshot-class"
-	otherprovisioner             = "other-provisioner"
-	otherVolumeSnapshotClassName = "other-volume-snapshot-class"
-	testVolumeName               = "test-volume"
-	testVolumeNameNotAllowed     = "test-volume-not-allowed"
-	validDataVolume              = "pvc-valid-data-volume"
-	nolabelDataVolume            = "nolabel-data-volume"
-	testClaimName                = "pvc-valid-data-volume"
-	testClaimName2               = "pvc-valid-data-volume2"
-	testClaimName3               = "pvc-valid-data-volume3"
-	testNamespace                = "test-namespace"
-	unboundTestClaimName         = "unbound-test-claim"
+	defaultStorageClassName         = "default-storage-class"
+	tenantStorageClassName          = "tenant-storage-class"
+	storageClassName                = "test-storage-class"
+	tenantVolumeSnapshotClassName   = "tenant-volume-snapshot-class"
+	volumeSnapshotClassName         = "test-volume-snapshot-class"
+	provisioner                     = "test-provisioner"
+	nonMatchingProvisioner          = "non-matching-provisioner-snapshot-class"
+	otherprovisioner                = "other-provisioner"
+	otherVolumeSnapshotClassName    = "other-volume-snapshot-class"
+	testVolumeName                  = "test-volume"
+	testVolumeNameNotAllowed        = "test-volume-not-allowed"
+	validDataVolume                 = "pvc-valid-data-volume"
+	nolabelDataVolume               = "nolabel-data-volume"
+	testClaimName                   = "pvc-valid-data-volume"
+	testClaimName2                  = "pvc-valid-data-volume2"
+	testClaimNameNotAllowed         = "pvc-valid-data-volume3"
+	testClaimNameDefault            = "pvc-default-storage-class"
+	testNamespace                   = "test-namespace"
+	unboundTestClaimName            = "unbound-test-claim"
+	snapshotClassNotFoundNoDefault  = "unable to determine volume snapshot class name for snapshot creation, and default not allowed"
+	snapshotClassNotFound           = "unable to determine volume snapshot class name for snapshot creation, no valid snapshot classes found"
+	snapshotClassNotFoundSuggestion = "volume snapshot class other-volume-snapshot-class is not compatible with PVC with storage class test-storage-class, valid snapshot classes for this pvc are [tenant-volume-snapshot-class]"
 )
 
 var _ = Describe("Client", func() {
@@ -107,46 +114,31 @@ var _ = Describe("Client", func() {
 			c = NewFakeClient()
 		})
 
-		DescribeTable("should return volume snapshot class or error", func(storageClassName, volumeSnapshotClassName, resultSnapshotClassName string, expectedError bool) {
-			res, err := c.getSnapshotClassFromStorageClass(context.TODO(), storageClassName, volumeSnapshotClassName)
-			if expectedError {
-				Expect(err).To(HaveOccurred())
-			} else {
-				Expect(err).ToNot(HaveOccurred())
-				Expect(res.Name).To(Equal(resultSnapshotClassName))
-			}
-		},
-			Entry("should return volume snapshot class", storageClassName, volumeSnapshotClassName, volumeSnapshotClassName, false),
-			Entry("should return default snapshot class", storageClassName, "", otherVolumeSnapshotClassName, false),
-			Entry("should return error with non existing storage class", "non-existing-storage-class", "", "", true),
-			Entry("should return error when provider doesn't match", storageClassName, nonMatchingProvisioner, "", true),
-		)
-
-		It("Storage class from volume should return a storage class", func() {
-			storageClass, err := c.getStorageClassFromVolume(context.TODO(), testVolumeName)
+		It("storage class from claim should return a storage class name", func() {
+			storageClassName, err := c.getStorageClassNameFromClaimName(context.TODO(), testNamespace, testClaimName)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(storageClass).To(Equal(storageClassName))
+			Expect(storageClassName).To(Equal(storageClassName))
 		})
 
-		It("Storage class from volume should return error if getting volume returns an error", func() {
-			storageClass, err := c.getStorageClassFromVolume(context.TODO(), "invalid")
+		It("storage class from claim should return error if getting claim name returns an error", func() {
+			volumeName, err := c.getStorageClassNameFromClaimName(context.TODO(), testNamespace, "invalid")
 			Expect(err).To(HaveOccurred())
-			Expect(storageClass).To(Equal(""))
+			Expect(volumeName).To(Equal(""))
 		})
 
-		It("volume from claim should return a volume name", func() {
-			volumeName, err := c.getVolumeNameFromClaimName(context.TODO(), testNamespace, testClaimName)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(volumeName).To(Equal(testVolumeName))
-		})
-
-		It("volume from claim should return error if getting claim name returns an error", func() {
-			volumeName, err := c.getVolumeNameFromClaimName(context.TODO(), testNamespace, "invalid")
+		It("snapshot class from claim name should return error if claim has nil storage class, and not allow default", func() {
+			c.storageClassEnforcement.AllowDefault = false
+			volumeName, err := c.getSnapshotClassNameFromVolumeClaimName(context.TODO(), testNamespace, testClaimNameDefault, volumeSnapshotClassName)
 			Expect(err).To(HaveOccurred())
 			Expect(volumeName).To(Equal(""))
 		})
 
 		DescribeTable("should return snapshot class from claim or error", func(claimName, namespace, snapshotClassName, resultSnapshotClassName string, expectedError bool) {
+			c.storageClassEnforcement = createDefaultStorageClassEnforcement()
+			fakeTenantSnapClient := snapfake.NewSimpleClientset()
+			mapping, err := c.buildStorageClassSnapshotClassMapping(c.tenantKubernetesClient, fakeTenantSnapClient, c.storageClassEnforcement.StorageSnapshotMapping)
+			Expect(err).ToNot(HaveOccurred())
+			c.infraTenantStorageSnapshotMapping = mapping
 			res, err := c.getSnapshotClassNameFromVolumeClaimName(context.TODO(), namespace, claimName, snapshotClassName)
 			if expectedError {
 				Expect(err).To(HaveOccurred())
@@ -158,18 +150,16 @@ var _ = Describe("Client", func() {
 		},
 			Entry("should return snapshot class", testClaimName, testNamespace, volumeSnapshotClassName, volumeSnapshotClassName, false),
 			Entry("should return error when claim is invalid", "invalid", testNamespace, volumeSnapshotClassName, "", true),
-			Entry("should return error when claim is unbound", unboundTestClaimName, testNamespace, volumeSnapshotClassName, "", true),
-			Entry("should return error when volume cannot be found", testClaimName2, testNamespace, volumeSnapshotClassName, "", true),
 		)
 
 		It("should return error if the storage class is not allowed", func() {
-			res, err := c.getSnapshotClassNameFromVolumeClaimName(context.TODO(), testNamespace, testClaimName3, volumeSnapshotClassName)
+			res, err := c.getSnapshotClassNameFromVolumeClaimName(context.TODO(), testNamespace, testClaimNameNotAllowed, volumeSnapshotClassName)
 			Expect(err).To(HaveOccurred())
 			Expect(res).To(Equal(""))
-			Expect(err.Error()).To(ContainSubstring("not allowed for snapshot creation"))
+			Expect(err.Error()).To(ContainSubstring(snapshotClassNotFound))
 		})
 
-		It("should return error if the storage class is not allowed", func() {
+		It("should return not error if the storage class is not allowed, but allowAll is true", func() {
 			c.storageClassEnforcement.AllowAll = true
 			c.storageClassEnforcement.AllowList = nil
 			_, err := c.getSnapshotClassNameFromVolumeClaimName(context.TODO(), testNamespace, testClaimName, volumeSnapshotClassName)
@@ -184,10 +174,27 @@ var _ = Describe("Client", func() {
 		})
 
 		It("should return error if the volume snapshot class is not found", func() {
+			c.storageClassEnforcement.AllowDefault = false
 			s, err := c.CreateVolumeSnapshot(context.TODO(), testNamespace, "snap", validDataVolume, "non-existing-snapshot-class")
 			Expect(err).To(HaveOccurred())
 			Expect(s).To(BeNil())
-			Expect(err.Error()).To(ContainSubstring("provided volume snapshot class cannot be matched with storage class"))
+			Expect(err.Error()).To(ContainSubstring(snapshotClassNotFound))
+		})
+
+		It("should return error if the volume snapshot class is not found, and passed in value is empty, and allowDefault = false", func() {
+			c.storageClassEnforcement.AllowDefault = false
+			s, err := c.CreateVolumeSnapshot(context.TODO(), testNamespace, "snap", validDataVolume, "")
+			Expect(err).To(HaveOccurred())
+			Expect(s).To(BeNil())
+			Expect(err.Error()).To(ContainSubstring(snapshotClassNotFound))
+		})
+
+		It("should return nil with snapshot if the volume snapshot class is not found, and passed in value is empty, and allowDefault = true", func() {
+			c.storageClassEnforcement.AllowDefault = true
+			s, err := c.CreateVolumeSnapshot(context.TODO(), testNamespace, "snap", validDataVolume, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(s).ToNot(BeNil())
+			Expect(s.Spec.VolumeSnapshotClassName).To(BeNil())
 		})
 
 		It("should return error if the DV is not found", func() {
@@ -198,6 +205,11 @@ var _ = Describe("Client", func() {
 		})
 
 		It("should delete volumesnapshot if it exists and it valid", func() {
+			c.storageClassEnforcement = createDefaultStorageClassEnforcement()
+			fakeTenantSnapClient := snapfake.NewSimpleClientset()
+			mapping, err := c.buildStorageClassSnapshotClassMapping(c.tenantKubernetesClient, fakeTenantSnapClient, c.storageClassEnforcement.StorageSnapshotMapping)
+			Expect(err).ToNot(HaveOccurred())
+			c.infraTenantStorageSnapshotMapping = mapping
 			s, err := c.CreateVolumeSnapshot(context.TODO(), testNamespace, "snap", validDataVolume, volumeSnapshotClassName)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(s.Name).To(Equal("snap"))
@@ -211,6 +223,11 @@ var _ = Describe("Client", func() {
 		})
 
 		It("should return error if get volume returns an error", func() {
+			c.storageClassEnforcement = createDefaultStorageClassEnforcement()
+			fakeTenantSnapClient := snapfake.NewSimpleClientset()
+			mapping, err := c.buildStorageClassSnapshotClassMapping(c.tenantKubernetesClient, fakeTenantSnapClient, c.storageClassEnforcement.StorageSnapshotMapping)
+			Expect(err).ToNot(HaveOccurred())
+			c.infraTenantStorageSnapshotMapping = mapping
 			s, err := c.CreateVolumeSnapshot(context.TODO(), testNamespace, "snap", validDataVolume, volumeSnapshotClassName)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(s.Name).To(Equal("snap"))
@@ -220,6 +237,11 @@ var _ = Describe("Client", func() {
 		})
 
 		It("should properly list snapshots", func() {
+			c.storageClassEnforcement = createDefaultStorageClassEnforcement()
+			fakeTenantSnapClient := snapfake.NewSimpleClientset()
+			mapping, err := c.buildStorageClassSnapshotClassMapping(c.tenantKubernetesClient, fakeTenantSnapClient, c.storageClassEnforcement.StorageSnapshotMapping)
+			Expect(err).ToNot(HaveOccurred())
+			c.infraTenantStorageSnapshotMapping = mapping
 			s, err := c.CreateVolumeSnapshot(context.TODO(), testNamespace, "snap", validDataVolume, volumeSnapshotClassName)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(s.Name).To(Equal("snap"))
@@ -240,20 +262,55 @@ var _ = Describe("Client", func() {
 			c = NewFakeClient()
 		})
 
-		DescribeTable("should properly calculate if storage class is allowed", func(storageClassName string, enforcement util.StorageClassEnforcement, expected bool) {
+		DescribeTable("should properly determine snapshot class from storage class", func(snapshotClassName, claimName string, enforcement util.StorageClassEnforcement, tenantSnapClient snapcli.Interface, expected, expectedError string) {
 			c.storageClassEnforcement = enforcement
-			res, err := c.isStorageClassAllowed(context.TODO(), storageClassName)
+			mapping, err := c.buildStorageClassSnapshotClassMapping(c.tenantKubernetesClient, tenantSnapClient, c.storageClassEnforcement.StorageSnapshotMapping)
 			Expect(err).ToNot(HaveOccurred())
+			c.infraTenantStorageSnapshotMapping = mapping
+			res, err := c.getSnapshotClassNameFromVolumeClaimName(context.TODO(), testNamespace, claimName, snapshotClassName)
+			if expectedError != "" {
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(expectedError))
+			} else {
+				Expect(err).ToNot(HaveOccurred())
+			}
 			Expect(res).To(Equal(expected))
 		},
-			Entry("should return true if storage class is in allowedList", storageClassName,
-				util.StorageClassEnforcement{AllowList: []string{storageClassName}}, true),
-			Entry("should return false if storage class is not in allowedList", storageClassName,
-				util.StorageClassEnforcement{AllowList: []string{}}, false),
-			Entry("should return true if default but not in allowedList", defaultStorageClassName,
-				util.StorageClassEnforcement{AllowList: []string{}, AllowDefault: true}, true),
-			Entry("should return false if not default and not in allowedList", storageClassName,
-				util.StorageClassEnforcement{AllowList: []string{}, AllowDefault: true}, false),
+			Entry("should return snapshot class if storage class is in allowedList",
+				volumeSnapshotClassName,
+				testClaimName,
+				createDefaultStorageClassEnforcement(),
+				snapfake.NewSimpleClientset(),
+				volumeSnapshotClassName,
+				""),
+			Entry("should return blank if storage class is not in allowedList",
+				volumeSnapshotClassName,
+				testClaimNameNotAllowed,
+				createDefaultStorageClassEnforcement(),
+				snapfake.NewSimpleClientset(),
+				"",
+				snapshotClassNotFound),
+			Entry("should return blank and no error if AllowDefault but not in allowedList",
+				volumeSnapshotClassName,
+				testClaimNameDefault,
+				createAllowDefaultStorageClassEnforcement(),
+				snapfake.NewSimpleClientset(),
+				"",
+				""),
+			Entry("should return error if not in allowedList",
+				volumeSnapshotClassName,
+				testClaimNameDefault,
+				createDefaultStorageClassEnforcement(),
+				snapfake.NewSimpleClientset(),
+				"",
+				snapshotClassNotFoundNoDefault),
+			Entry("should return error with suggestion if not in allowedList, but valid snapshot classes exist",
+				otherVolumeSnapshotClassName,
+				testClaimName,
+				createDefaultStorageClassEnforcement(),
+				snapfake.NewSimpleClientset(createTenantVolumeSnapshotClass(tenantVolumeSnapshotClassName, "csi.kubevirt.io", volumeSnapshotClassName), createVolumeSnapshotClass("no-parameter", "ceph.csi.io", false)),
+				"",
+				snapshotClassNotFoundSuggestion),
 		)
 	})
 
@@ -270,9 +327,10 @@ func NewFakeClient() *client {
 	defaultStorageClass := createStorageClass(defaultStorageClassName, provisioner, true)
 	testVolume := createPersistentVolume(testVolumeName, storageClassName)
 	testVolumeNotAllowed := createPersistentVolume(testVolumeNameNotAllowed, "not-allowed-storage-class")
-	testClaim := createPersistentVolumeClaim(testClaimName, testVolumeName, storageClassName)
-	testClaim2 := createPersistentVolumeClaim(testClaimName2, "testVolumeName2", storageClassName)
-	testClaim3 := createPersistentVolumeClaim(testClaimName3, testVolumeNameNotAllowed, "not-allowed-storage-class")
+	testClaim := createPersistentVolumeClaim(testClaimName, testVolumeName, ptr.To[string](storageClassName))
+	testClaim2 := createPersistentVolumeClaim(testClaimName2, "testVolumeName2", ptr.To[string](storageClassName))
+	testClaim3 := createPersistentVolumeClaim(testClaimNameNotAllowed, testVolumeNameNotAllowed, ptr.To[string]("not-allowed-storage-class"))
+	testClaimDefault := createPersistentVolumeClaim(testClaimNameDefault, testVolumeName, nil)
 	unboundClaim := &k8sv1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      unboundTestClaimName,
@@ -283,18 +341,20 @@ func NewFakeClient() *client {
 		},
 	}
 	fakeK8sClient := k8sfake.NewSimpleClientset(storageClass, defaultStorageClass, testVolume,
-		testVolumeNotAllowed, testClaim, testClaim2, testClaim3, unboundClaim)
+		testVolumeNotAllowed, testClaim, testClaim2, testClaim3, unboundClaim, testClaimDefault)
 
+	fakeTenantK8sClient := k8sfake.NewSimpleClientset(createTenantStorageClass(tenantStorageClassName, "csi.kubevirt.io", storageClassName), createStorageClass("no-parameter-storage-class", "test.io", false))
 	fakeSnapClient := snapfake.NewSimpleClientset(
 		createVolumeSnapshotClass(volumeSnapshotClassName, provisioner, false),
 		createVolumeSnapshotClass(nonMatchingProvisioner, otherprovisioner, false),
 		createVolumeSnapshotClass(otherVolumeSnapshotClassName, provisioner, true),
 	)
 	result := &client{
-		kubernetesClient: fakeK8sClient,
-		snapClient:       fakeSnapClient,
-		infraLabelMap:    map[string]string{"test": "test"},
-		volumePrefix:     "pvc-",
+		infraKubernetesClient:  fakeK8sClient,
+		tenantKubernetesClient: fakeTenantK8sClient,
+		infraSnapClient:        fakeSnapClient,
+		infraLabelMap:          map[string]string{"test": "test"},
+		volumePrefix:           "pvc-",
 		storageClassEnforcement: util.StorageClassEnforcement{
 			AllowList:    []string{storageClassName},
 			AllowAll:     false,
@@ -319,6 +379,19 @@ func createVolumeSnapshotClass(name, provisioner string, isDefault bool) *snapsh
 	return res
 }
 
+func createTenantVolumeSnapshotClass(name, provisioner, infraSnapshotClassName string) *snapshotv1.VolumeSnapshotClass {
+	res := &snapshotv1.VolumeSnapshotClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Driver: provisioner,
+		Parameters: map[string]string{
+			InfraSnapshotClassNameParameter: infraSnapshotClassName,
+		},
+	}
+	return res
+}
+
 func createPersistentVolume(name, storageClassName string) *k8sv1.PersistentVolume {
 	return &k8sv1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
@@ -330,18 +403,21 @@ func createPersistentVolume(name, storageClassName string) *k8sv1.PersistentVolu
 	}
 }
 
-func createPersistentVolumeClaim(name, volumeName, storageClassName string) *k8sv1.PersistentVolumeClaim {
-	return &k8sv1.PersistentVolumeClaim{
+func createPersistentVolumeClaim(name, volumeName string, storageClassName *string) *k8sv1.PersistentVolumeClaim {
+	pvc := &k8sv1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: testNamespace,
 			Labels:    map[string]string{"test": "test"},
 		},
 		Spec: k8sv1.PersistentVolumeClaimSpec{
-			StorageClassName: ptr.To[string](storageClassName),
-			VolumeName:       volumeName,
+			VolumeName: volumeName,
 		},
 	}
+	if storageClassName != nil {
+		pvc.Spec.StorageClassName = storageClassName
+	}
+	return pvc
 }
 
 func createStorageClass(name, provisioner string, isDefault bool) *storagev1.StorageClass {
@@ -355,6 +431,19 @@ func createStorageClass(name, provisioner string, isDefault bool) *storagev1.Sto
 		res.Annotations = map[string]string{
 			"storageclass.kubernetes.io/is-default-class": "true",
 		}
+	}
+	return res
+}
+
+func createTenantStorageClass(name, provisioner, infraStorageClassName string) *storagev1.StorageClass {
+	res := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Provisioner: provisioner,
+		Parameters: map[string]string{
+			InfraStorageClassNameParameter: infraStorageClassName,
+		},
 	}
 	return res
 }
@@ -380,4 +469,28 @@ func createNoLabelDataVolume() *cdiv1.DataVolume {
 
 func createWrongPrefixDataVolume() *cdiv1.DataVolume {
 	return createDataVolume(testVolumeName, map[string]string{"test": "test"})
+}
+
+func createDefaultStorageClassEnforcement() util.StorageClassEnforcement {
+	return util.StorageClassEnforcement{
+		AllowList: []string{storageClassName},
+		AllowAll:  false,
+		StorageSnapshotMapping: []util.StorageSnapshotMapping{
+			{
+				StorageClasses: []string{
+					storageClassName,
+				},
+				VolumeSnapshotClasses: []string{
+					volumeSnapshotClassName,
+				},
+			},
+		},
+	}
+}
+
+func createAllowDefaultStorageClassEnforcement() util.StorageClassEnforcement {
+	return util.StorageClassEnforcement{
+		AllowAll:     false,
+		AllowDefault: true,
+	}
 }
