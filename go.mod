@@ -1,6 +1,6 @@
 module kubevirt.io/csi-driver
 
-go 1.21
+go 1.22
 
 require (
 	github.com/container-storage-interface/spec v1.6.0
