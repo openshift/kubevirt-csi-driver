@@ -383,7 +383,7 @@ func (c *ControllerService) ControllerPublishVolume(
 		return nil, err
 	}
 
-	// Ensure that the csi-attacher and csi-provisioner --timeout values are > the timeout specified here so we don't get
+	// Ensure that the csi-attacher & csi-provisioner --timeout values are > the timeout specified here so we don't get
 	// odd failures with detaching volumes.
 	err = c.virtClient.EnsureVolumeAvailable(ctx, c.infraClusterNamespace, vmName, dvName, time.Minute*2)
 	if err != nil {
