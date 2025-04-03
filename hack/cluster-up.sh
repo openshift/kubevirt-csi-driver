@@ -23,11 +23,12 @@ echo "Installing networking (calico)"
 
 echo "Enable hotplug"
 #Add the feature gate to the resource of type Kubevirt.
-./kubevirtci kubectl patch -n kubevirt kubevirt.kubevirt.io kubevirt  -p '{"spec":  { "configuration": { "developerConfiguration": { "featureGates": ["HotplugVolumes" ] }}}}' -o json --type merge
+./kubevirtci kubectl patch -n kubevirt kubevirt.kubevirt.io kubevirt  -p '{"spec":  { "configuration": { "developerConfiguration": { "featureGates": ["HotplugVolumes", "ExpandDisks"] }}}}' -o json --type merge
 
-# enables insecure registry
 for vmi in $(./kubevirtci kubectl get vmi -A --no-headers | awk '{ print $2 }')
 do
+        # enables insecure registry
         cat hack/vmi-insecure-registry | ./kubevirtci ssh-tenant $vmi $TENANT_CLUSTER_NAMESPACE
+        # sets shell to bash
+        echo 'sudo sed -i "s/home\/capk:.*/home\/capk:\/bin\/bash/g" /etc/passwd' | ./kubevirtci ssh-tenant $vmi $TENANT_CLUSTER_NAMESPACE
 done
-

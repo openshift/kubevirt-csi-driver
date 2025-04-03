@@ -9,7 +9,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/mount"
+	mount "k8s.io/mount-utils"
 	"kubevirt.io/csi-driver/pkg/service"
 	"kubevirt.io/csi-driver/pkg/util"
 )
@@ -33,6 +33,9 @@ var _ = ginkgo.BeforeSuite(func() {
 			values: make([]mountArgs, 0),
 		}
 	}
+	service.NewResizer = func() service.ResizerInterface {
+		return &fakeResizer{}
+	}
 	service.NewDeviceLister = func() service.DeviceLister {
 		return deviceLister
 	}
@@ -51,7 +54,7 @@ var _ = ginkgo.BeforeSuite(func() {
 		infraClusterNamespace,
 		infraClusterLabelsMap,
 		storagClassEnforcement,
-		nodeID,
+		getKey(infraClusterNamespace, nodeID),
 		true,
 		true)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
