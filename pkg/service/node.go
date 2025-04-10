@@ -47,7 +47,7 @@ var NewMounter = func() mount.Interface {
 var NewDeviceLister = func() DeviceLister {
 	return deviceListerFunc(func() ([]byte, error) {
 		klog.V(5).Info("lsblk -nJo SERIAL,FSTYPE,NAME")
-		// must be lsblk recent enough for json format
+		// lsblk must be recent enough for json format
 		return exec.Command("lsblk", "-nJo", "SERIAL,FSTYPE,NAME").Output()
 	})
 }
