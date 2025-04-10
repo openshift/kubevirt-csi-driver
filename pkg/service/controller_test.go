@@ -180,10 +180,17 @@ var _ = Describe("PublishUnPublish", func() {
 	})
 
 	It("should successfully unpublish", func() {
-		client.virtualMachineStatus.VolumeStatus = append(client.virtualMachineStatus.VolumeStatus, kubevirtv1.VolumeStatus{
-			Name:          testVolumeName,
-			HotplugVolume: &kubevirtv1.HotplugVolumeStatus{},
-		})
+		client.vmVolumes = []kubevirtv1.Volume{
+			{
+				Name: testVolumeName,
+				VolumeSource: kubevirtv1.VolumeSource{
+					DataVolume: &kubevirtv1.DataVolumeSource{
+						Name:         testVolumeName,
+						Hotpluggable: true,
+					},
+				},
+			},
+		}
 
 		_, err := controller.ControllerUnpublishVolume(context.TODO(), getUnpublishVolumeRequest())
 		Expect(err).ToNot(HaveOccurred())
@@ -195,10 +202,28 @@ var _ = Describe("PublishUnPublish", func() {
 	})
 
 	It("should return success when unpublishing a volume from a VM that doesn't exist", func() {
+		client.ShouldReturnVMNotFound = true
 		req := getUnpublishVolumeRequest()
-		req.NodeId = "non-existent-node"
+		req.NodeId = getKey(testInfraNamespace, "non-existent-node")
 		_, err := controller.ControllerUnpublishVolume(context.TODO(), req)
 		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("should unplug from VMI for carry over from old versions", func() {
+		capturingClient := &vmiUnplugCapturingClient{
+			ControllerClientMock: client,
+		}
+		controller.virtClient = capturingClient
+		// The driver used to only hotplug to VMI in older versions
+		capturingClient.virtualMachineStatus.VolumeStatus = append(client.virtualMachineStatus.VolumeStatus, kubevirtv1.VolumeStatus{
+			Name:          testVolumeName,
+			HotplugVolume: &kubevirtv1.HotplugVolumeStatus{},
+		})
+		capturingClient.vmVolumes = make([]kubevirtv1.Volume, 0)
+
+		_, err := controller.ControllerUnpublishVolume(context.TODO(), getUnpublishVolumeRequest())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(capturingClient.hotunplugForVMIOccured).To(BeTrue())
 	})
 })
 
@@ -503,9 +528,8 @@ var (
 	testInfraStorageClassName                     = "infra-storage"
 	testVolumeStorageSize     int64               = 1024 * 1024 * 1024 * 3
 	testInfraNamespace                            = "tenant-cluster-2"
-	testNodeID                                    = "6FC9C805-B3A0-570B-9D1B-3B8B9CFC9FB7"
+	testNodeID                                    = getKey(testInfraNamespace, testVMName)
 	testVMName                                    = "test-vm"
-	testVMUID                                     = "6fc9c805-b3a0-570b-9d1b-3b8b9cfc9fb7"
 	testDataVolumeUID                             = "2d0111d5-494f-4731-8f67-122b27d3c366"
 	testBusType               *kubevirtv1.DiskBus = nil // nil==do not pass bus type
 	testInfraLabels                               = map[string]string{"infra-label-name": "infra-label-value"}
@@ -600,7 +624,9 @@ type ControllerClientMock struct {
 	FailCreateSnapshot      bool
 	FailDeleteSnapshot      bool
 	FailListSnapshots       bool
+	ShouldReturnVMNotFound  bool
 	virtualMachineStatus    kubevirtv1.VirtualMachineInstanceStatus
+	vmVolumes               []kubevirtv1.Volume
 	snapshots               map[string]*snapshotv1.VolumeSnapshot
 	datavolumes             map[string]*cdiv1.DataVolume
 }
@@ -628,13 +654,6 @@ func (c *ControllerClientMock) ListVirtualMachines(_ context.Context, namespace 
 				Name:      testVMName,
 				Namespace: namespace,
 			},
-			Spec: kubevirtv1.VirtualMachineInstanceSpec{
-				Domain: kubevirtv1.DomainSpec{
-					Firmware: &kubevirtv1.Firmware{
-						UUID: types.UID(testVMUID),
-					},
-				},
-			},
 		},
 	}, nil
 }
@@ -649,14 +668,30 @@ func (c *ControllerClientMock) GetVirtualMachine(_ context.Context, namespace, n
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: kubevirtv1.VirtualMachineInstanceSpec{
-			Domain: kubevirtv1.DomainSpec{
-				Firmware: &kubevirtv1.Firmware{
-					UUID: types.UID(testVMUID),
+		Spec:   kubevirtv1.VirtualMachineInstanceSpec{},
+		Status: c.virtualMachineStatus,
+	}, nil
+}
+
+func (c *ControllerClientMock) GetWorkloadManagingVirtualMachine(_ context.Context, namespace, name string) (*kubevirtv1.VirtualMachine, error) {
+	if c.ShouldReturnVMNotFound {
+		return nil, k8serrors.NewNotFound(corev1.Resource("vm"), name)
+	}
+	volumes := make([]kubevirtv1.Volume, 0)
+	volumes = append(volumes, c.vmVolumes...)
+
+	return &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: kubevirtv1.VirtualMachineSpec{
+			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
+				Spec: kubevirtv1.VirtualMachineInstanceSpec{
+					Volumes: volumes,
 				},
 			},
 		},
-		Status: c.virtualMachineStatus,
 	}, nil
 }
 
@@ -739,6 +774,9 @@ func (c *ControllerClientMock) RemoveVolumeFromVM(_ context.Context, namespace s
 
 	return nil
 }
+func (c *ControllerClientMock) RemoveVolumeFromVMI(_ context.Context, namespace string, vmName string, removeVolumeOptions *kubevirtv1.RemoveVolumeOptions) error {
+	return nil
+}
 
 func (c *ControllerClientMock) EnsureVolumeAvailable(_ context.Context, namespace, vmName, volumeName string, timeout time.Duration) error {
 	return nil
@@ -814,6 +852,17 @@ func (c *ControllerClientMock) ListVolumeSnapshots(ctx context.Context, namespac
 		res.Items = append(res.Items, *v)
 	}
 	return res, nil
+}
+
+type vmiUnplugCapturingClient struct {
+	*ControllerClientMock
+	hotunplugForVMIOccured bool
+}
+
+func (c *vmiUnplugCapturingClient) RemoveVolumeFromVMI(_ context.Context, namespace string, vmName string, removeVolumeOptions *kubevirtv1.RemoveVolumeOptions) error {
+	c.hotunplugForVMIOccured = true
+
+	return nil
 }
 
 func getKey(namespace, name string) string {
