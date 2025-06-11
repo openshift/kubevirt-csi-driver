@@ -94,6 +94,7 @@ func NewClient(infraConfig *rest.Config, infraClusterLabelMap map[string]string,
 	Scheme := runtime.NewScheme()
 	// Could reduce this to just the metav1.Status{} type for error decoding
 	// But someone else will likely trip on another type in the future
+	// test
 	if err := k8sv1.AddToScheme(Scheme); err != nil {
 		return nil, err
 	}
