@@ -67,6 +67,7 @@ func NewNodeService(nodeId string) *NodeService {
 		mounter:      NewMounter(),
 		dirMaker: dirMakerFunc(func(path string, perm os.FileMode) error {
 			// MkdirAll returns nil if path already exists
+			// dummy
 			return os.MkdirAll(path, perm)
 		}),
 	}
