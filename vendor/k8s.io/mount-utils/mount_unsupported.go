@@ -44,8 +44,18 @@ func (mounter *Mounter) Mount(source string, target string, fstype string, optio
 	return errUnsupported
 }
 
-// Mount always returns an error on unsupported platforms
+// MountSensitive always returns an error on unsupported platforms
 func (mounter *Mounter) MountSensitive(source string, target string, fstype string, options []string, sensitiveOptions []string) error {
+	return errUnsupported
+}
+
+// MountSensitiveWithoutSystemd always returns an error on unsupported platforms
+func (mounter *Mounter) MountSensitiveWithoutSystemd(source string, target string, fstype string, options []string, sensitiveOptions []string) error {
+	return errUnsupported
+}
+
+// MountSensitiveWithoutSystemdWithMountFlags always returns an error on unsupported platforms
+func (mounter *Mounter) MountSensitiveWithoutSystemdWithMountFlags(source string, target string, fstype string, options []string, sensitiveOptions []string, mountFlags []string) error {
 	return errUnsupported
 }
 
@@ -64,15 +74,32 @@ func (mounter *Mounter) IsLikelyNotMountPoint(file string) (bool, error) {
 	return true, errUnsupported
 }
 
+// CanSafelySkipMountPointCheck always returns false on unsupported platforms
+func (mounter *Mounter) CanSafelySkipMountPointCheck() bool {
+	return false
+}
+
+// IsMountPoint determines if a directory is a mountpoint.
+// It always returns an error on unsupported platforms.
+func (mounter *Mounter) IsMountPoint(file string) (bool, error) {
+	return false, errUnsupported
+}
+
 // GetMountRefs always returns an error on unsupported platforms
 func (mounter *Mounter) GetMountRefs(pathname string) ([]string, error) {
 	return nil, errUnsupported
 }
 
-func (mounter *SafeFormatAndMount) formatAndMountSensitive(source string, target string, fstype string, options []string, sensitiveOptions []string) error {
+func (mounter *SafeFormatAndMount) formatAndMountSensitive(source string, target string, fstype string, options []string, sensitiveOptions []string, formatOptions []string) error {
 	return mounter.Interface.Mount(source, target, fstype, options)
 }
 
 func (mounter *SafeFormatAndMount) diskLooksUnformatted(disk string) (bool, error) {
 	return true, errUnsupported
+}
+
+// IsMountPoint determines if a directory is a mountpoint.
+// It always returns an error on unsupported platforms.
+func (mounter *SafeFormatAndMount) IsMountPoint(file string) (bool, error) {
+	return false, errUnsupported
 }

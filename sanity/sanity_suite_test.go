@@ -9,7 +9,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/mount"
+	mount "k8s.io/mount-utils"
 	"kubevirt.io/csi-driver/pkg/service"
 	"kubevirt.io/csi-driver/pkg/util"
 )
@@ -25,18 +25,32 @@ var _ = ginkgo.BeforeSuite(func() {
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 	// Test labels
 	infraClusterLabelsMap := map[string]string{}
+	hotpluggedMap := map[string]device{}
 	identityClientset := createIdentityClient()
-	virtClient, deviceLister := createVirtClient()
+	virtClient := createVirtClient(hotpluggedMap)
+	deviceLister := &fakeDeviceLister{
+		hotpluggedMap: hotpluggedMap,
+	}
+	// needs to be pointer otherwise each append() assignment
+	// changes the slice header in just one of them
+	mountValues := &[]mountArgs{}
 
 	service.NewMounter = func() mount.Interface {
 		return &fakeMounter{
-			values: make([]mountArgs, 0),
+			values: mountValues,
 		}
+	}
+	service.NewResizer = func() service.ResizerInterface {
+		return &fakeResizer{}
 	}
 	service.NewDeviceLister = func() service.DeviceLister {
 		return deviceLister
 	}
-
+	service.NewDevicePathGetter = func() service.DevicePathGetter {
+		return &fakeDevicePathGetter{
+			mountArgs: mountValues,
+		}
+	}
 	service.NewFsMaker = func() service.FsMaker {
 		return &fakeFsMaker{}
 	}

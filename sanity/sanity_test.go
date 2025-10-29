@@ -36,7 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	fakeclient "k8s.io/client-go/kubernetes/fake"
-	"k8s.io/utils/mount"
+	mount "k8s.io/mount-utils"
 	"k8s.io/utils/ptr"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/csi-driver/pkg/kubevirt"
@@ -62,12 +62,12 @@ func createIdentityClient() kubernetes.Interface {
 	return fakeclient.NewSimpleClientset()
 }
 
-func createVirtClient() (kubevirt.Client, service.DeviceLister) {
+func createVirtClient(hotpluggedMap map[string]device) kubevirt.Client {
 	client := &fakeKubeVirtClient{
 		dvMap:         make(map[string]*cdiv1.DataVolume),
 		vmMap:         make(map[string]*kubevirtv1.VirtualMachine),
 		vmiMap:        make(map[string]*kubevirtv1.VirtualMachineInstance),
-		hotpluggedMap: make(map[string]device),
+		hotpluggedMap: hotpluggedMap,
 		snapshotMap:   make(map[string]*snapshotv1.VolumeSnapshot),
 	}
 	key := getKey(infraClusterNamespace, nodeID)
@@ -97,7 +97,7 @@ func createVirtClient() (kubevirt.Client, service.DeviceLister) {
 			},
 		},
 	}
-	return client, client
+	return client
 }
 
 type devices struct {
@@ -159,6 +159,16 @@ func (k *fakeKubeVirtClient) GetDataVolume(_ context.Context, namespace string, 
 	return k.dvMap[key], nil
 }
 
+func (k *fakeKubeVirtClient) GetPersistentVolumeClaim(_ context.Context, namespace string, claimName string) (*corev1.PersistentVolumeClaim, error) {
+	// Figure out correct impl. for sanity
+	return nil, nil
+}
+
+func (k *fakeKubeVirtClient) ExpandPersistentVolumeClaim(_ context.Context, namespace string, claimName string, size int64) error {
+	// Figure out correct impl. for sanity
+	return nil
+}
+
 func (k *fakeKubeVirtClient) CreateDataVolume(_ context.Context, namespace string, dataVolume *cdiv1.DataVolume) (*cdiv1.DataVolume, error) {
 	if dataVolume == nil {
 		return nil, fmt.Errorf("Nil datavolume passed")
@@ -203,6 +213,10 @@ func (k *fakeKubeVirtClient) EnsureVolumeRemoved(_ context.Context, namespace, v
 }
 
 func (k *fakeKubeVirtClient) EnsureSnapshotReady(_ context.Context, namespace, name string, timeout time.Duration) error {
+	return nil
+}
+
+func (k *fakeKubeVirtClient) EnsureControllerResize(_ context.Context, namespace, claimName string, timeout time.Duration) error {
 	return nil
 }
 
@@ -254,9 +268,13 @@ func (k *fakeKubeVirtClient) ListVolumeSnapshots(_ context.Context, namespace st
 	return &res, nil
 }
 
-func (k *fakeKubeVirtClient) List() ([]byte, error) {
+type fakeDeviceLister struct {
+	hotpluggedMap map[string]device
+}
+
+func (f *fakeDeviceLister) List() ([]byte, error) {
 	ds := make([]device, 0)
-	for _, value := range k.hotpluggedMap {
+	for _, value := range f.hotpluggedMap {
 		ds = append(ds, value)
 	}
 	d := devices{
@@ -277,7 +295,7 @@ type mountArgs struct {
 }
 
 type fakeMounter struct {
-	values []mountArgs
+	values *[]mountArgs
 }
 
 func (m *fakeMounter) Mount(source string, target string, fstype string, options []string) error {
@@ -288,13 +306,13 @@ func (m *fakeMounter) Mount(source string, target string, fstype string, options
 		options: options,
 	}
 	exists := false
-	for _, args := range m.values {
+	for _, args := range *m.values {
 		if reflect.DeepEqual(args, newArgs) {
 			exists = true
 		}
 	}
 	if !exists {
-		m.values = append(m.values, newArgs)
+		*m.values = append(*m.values, newArgs)
 	}
 	return nil
 }
@@ -305,7 +323,7 @@ func (m *fakeMounter) MountSensitive(source string, target string, fstype string
 
 func (m *fakeMounter) Unmount(target string) error {
 	existingValues := make([]mountArgs, 0)
-	for _, args := range m.values {
+	for _, args := range *m.values {
 		if args.target != target {
 			existingValues = append(existingValues, args)
 		} else {
@@ -313,13 +331,13 @@ func (m *fakeMounter) Unmount(target string) error {
 			Expect(err).ToNot(HaveOccurred())
 		}
 	}
-	m.values = existingValues
+	*m.values = existingValues
 	return nil
 }
 
 func (m *fakeMounter) List() ([]mount.MountPoint, error) {
 	res := make([]mount.MountPoint, 0)
-	for _, args := range m.values {
+	for _, args := range *m.values {
 		res = append(res, mount.MountPoint{
 			Device: args.source,
 			Path:   args.target,
@@ -334,11 +352,59 @@ func (m *fakeMounter) IsLikelyNotMountPoint(file string) (bool, error) {
 }
 
 func (m *fakeMounter) GetMountRefs(pathname string) ([]string, error) {
-	return nil, fmt.Errorf("Called GetMountRefs somewhere")
+	panic("shouldn't have called GetMountRefs")
+}
+
+func (m *fakeMounter) CanSafelySkipMountPointCheck() bool {
+	panic("shouldn't have called CanSafelySkipMountPointCheck")
+}
+
+func (m *fakeMounter) IsMountPoint(file string) (bool, error) {
+	panic("shouldn't have called IsMountPoint")
+}
+
+func (m *fakeMounter) MountSensitiveWithoutSystemd(source string, target string, fstype string, options []string, sensitiveOptions []string) error {
+	panic("shouldn't have called MountSensitiveWithoutSystemd")
+}
+
+func (m *fakeMounter) MountSensitiveWithoutSystemdWithMountFlags(source string, target string, fstype string, options []string, sensitiveOptions []string, mountFlags []string) error {
+	panic("shouldn't have called MountSensitiveWithoutSystemdWithMountFlags")
 }
 
 type fakeFsMaker struct{}
 
 func (fm *fakeFsMaker) Make(device string, fsType string) error {
 	return nil
+}
+
+type fakeResizer struct {
+	resizedMap map[string]struct{}
+}
+
+func (r *fakeResizer) Resize(devicePath, deviceMountPath string) (bool, error) {
+	if r.resizedMap == nil {
+		r.resizedMap = map[string]struct{}{}
+	}
+	key := fmt.Sprintf("%s:%s", devicePath, deviceMountPath)
+	r.resizedMap[key] = struct{}{}
+
+	return true, nil
+}
+
+func (r *fakeResizer) NeedResize(devicePath string, deviceMountPath string) (bool, error) {
+	return true, nil
+}
+
+type fakeDevicePathGetter struct {
+	mountArgs *[]mountArgs
+}
+
+func (d *fakeDevicePathGetter) Get(mountPath string) (string, error) {
+	for _, args := range *d.mountArgs {
+		if args.target == mountPath {
+			return args.source, nil
+		}
+	}
+
+	return "", service.ErrMountDeviceNotFound
 }
