@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 
-	"golang.org/x/net/context"
 	klog "k8s.io/klog/v2"
 )
 
@@ -360,7 +360,11 @@ func (n *NodeService) ensureMountFileExists(mountFile string) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() {
+			if closeErr := f.Close(); closeErr != nil {
+				klog.Errorf("failed to close file %s: %v", mountFile, closeErr)
+			}
+		}()
 	}
 	return err
 }
@@ -480,9 +484,12 @@ func getDeviceBySerialID(serialID string, deviceLister DeviceLister) (device, er
 	klog.Infof("Get the device details by serialID %s", serialID)
 
 	out, err := deviceLister.List()
-	exitError, incompleteCmd := err.(*exec.ExitError)
-	if err != nil && incompleteCmd {
-		return device{}, errors.New(err.Error() + "lsblk failed with " + string(exitError.Stderr))
+	if err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			return device{}, errors.New(err.Error() + " lsblk failed with " + string(exitError.Stderr))
+		}
+		return device{}, err
 	}
 
 	devices := devices{}
@@ -520,11 +527,14 @@ func makeFS(device string, fsType string) error {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	exitError, incompleteCmd := err.(*exec.ExitError)
-	if err != nil && incompleteCmd {
-		klog.Errorf("stdout: %s", stdout.String())
-		klog.Errorf("stderr: %s", stdout.String())
-		return errors.New(err.Error() + " mkfs failed with " + exitError.Error())
+	if err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			klog.Errorf("stdout: %s", stdout.String())
+			klog.Errorf("stderr: %s", stderr.String())
+			return errors.New(err.Error() + " mkfs failed with " + exitError.Error())
+		}
+		return err
 	}
 
 	return nil
