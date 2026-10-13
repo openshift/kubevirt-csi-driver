@@ -1,0 +1,38 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+kubevirt-csi-driver
+# don't ignore folder with the same name
+!kubevirt-csi-driver/
+*.code-workspace
+#k8s e2e suite
+.kvcluster-kubeconfig-e2e
+capk.pem
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+_out/*
+
+# kubevirtCI
+_ci-configs/
+/cluster-up/
+
+# ide
+.idea
+/hack/tools/
+/.kvcluster-kubeconfig
+hack/tools/bin/
+
+# kustomize dev overlay
+/deploy/controller-tenant/dev-overlay/*.yaml
+/deploy/controller-infra/dev-overlay/*.yaml
+/deploy/tenant/dev-overlay/*.yaml
