@@ -28,6 +28,12 @@ const (
 	busParameter    = "bus"
 	busDefaultValue = kubevirtv1.DiskBus("scsi")
 	serialParameter = "serial"
+
+	// defaultDVProvisioningCheckTimeout is used when no explicit timeout is
+	// configured via --dv-provisioning-check-timeout.  Keep this well below
+	// the external-provisioner --timeout (default 60 s) so the CSI call
+	// completes within the provisioner's deadline.
+	defaultDVProvisioningCheckTimeout = 30 * time.Second
 )
 
 var (
@@ -41,6 +47,21 @@ type ControllerService struct {
 	infraClusterNamespace   string
 	infraClusterLabels      map[string]string
 	storageClassEnforcement util.StorageClassEnforcement
+	// dvProvisioningCheckTimeout overrides defaultDVProvisioningCheckTimeout
+	// when set to a positive value via --dv-provisioning-check-timeout at
+	// startup.  A zero value (the default) falls back to
+	// defaultDVProvisioningCheckTimeout.
+	dvProvisioningCheckTimeout time.Duration
+}
+
+// provisioningCheckTimeout returns the effective DataVolume provisioning check
+// timeout.  A zero or negative value means "not configured", so the default
+// is used.
+func (c *ControllerService) provisioningCheckTimeout() time.Duration {
+	if c.dvProvisioningCheckTimeout > 0 {
+		return c.dvProvisioningCheckTimeout
+	}
+	return defaultDVProvisioningCheckTimeout
 }
 
 var controllerCaps = []csi.ControllerServiceCapability_RPC_Type{
@@ -213,6 +234,18 @@ func (c *ControllerService) CreateVolume(ctx context.Context, req *csi.CreateVol
 			}
 			dv = existingDv
 		}
+	}
+
+	// Verify the DataVolume can actually be provisioned on the management cluster.
+	// This detects early, definitive failures (e.g. quota exceeded) and
+	// propagates them to the guest as a proper CSI error so the guest PVC
+	// stays Pending with an informative event rather than appearing Bound
+	// against a management-cluster PVC that is stuck Pending.
+	// A timeout (no definitive outcome yet) is treated as transient and does
+	// not block the response – the external-provisioner will retry.
+	if err := c.virtClient.WaitForDataVolumeProvisionable(ctx, c.infraClusterNamespace, dvName, c.provisioningCheckTimeout()); err != nil {
+		klog.Errorf("DataVolume %s/%s provisioning check failed: %v", c.infraClusterNamespace, dvName, err)
+		return nil, err
 	}
 
 	// Prepare serial for disk
