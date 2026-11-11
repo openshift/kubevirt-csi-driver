@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestResolveNodeID(t *testing.T) {
@@ -147,4 +148,29 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestParseConfigDVProvisioningCheckTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want time.Duration
+	}{
+		{name: "default", args: nil, want: 30 * time.Second},
+		{name: "custom 10s", args: []string{"--dv-provisioning-check-timeout=10s"}, want: 10 * time.Second},
+		{name: "custom 1m", args: []string{"--dv-provisioning-check-timeout=1m"}, want: time.Minute},
+		{name: "zero uses default", args: []string{"--dv-provisioning-check-timeout=0"}, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseConfig(tt.args)
+			if err != nil {
+				t.Fatalf("parseConfig() error = %v", err)
+			}
+			if cfg.dvProvisioningCheckTimeout != tt.want {
+				t.Errorf("dvProvisioningCheckTimeout = %v, want %v", cfg.dvProvisioningCheckTimeout, tt.want)
+			}
+		})
+	}
 }

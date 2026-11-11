@@ -1,6 +1,8 @@
 package service
 
 import (
+	"time"
+
 	"k8s.io/client-go/kubernetes"
 	klog "k8s.io/klog/v2"
 
@@ -43,12 +45,14 @@ func (d *KubevirtCSIDriver) WithControllerService(
 	infraClusterNamespace string,
 	infraClusterLabels map[string]string,
 	storageClassEnforcement util.StorageClassEnforcement,
+	dvProvisioningCheckTimeout time.Duration,
 ) *KubevirtCSIDriver {
 	d.ControllerService = NewControllerService(
 		virtClient,
 		infraClusterNamespace,
 		infraClusterLabels,
 		storageClassEnforcement,
+		dvProvisioningCheckTimeout,
 	)
 	return d
 }
