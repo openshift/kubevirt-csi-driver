@@ -1,6 +1,8 @@
 package service
 
 import (
+	"time"
+
 	"k8s.io/client-go/kubernetes"
 	klog "k8s.io/klog/v2"
 
@@ -30,17 +32,19 @@ func NewKubevirtCSIDriver(virtClient kubevirt.Client,
 	storageClassEnforcement util.StorageClassEnforcement,
 	nodeID string,
 	runNodeService bool,
-	runControllerService bool) *KubevirtCSIDriver {
+	runControllerService bool,
+	dvProvisioningCheckTimeout time.Duration) *KubevirtCSIDriver {
 	d := KubevirtCSIDriver{
 		IdentityService: NewIdentityService(identityClientset),
 	}
 
 	if runControllerService {
 		d.ControllerService = &ControllerService{
-			virtClient:              virtClient,
-			infraClusterNamespace:   infraClusterNamespace,
-			infraClusterLabels:      infraClusterLabels,
-			storageClassEnforcement: storageClassEnforcement,
+			virtClient:                 virtClient,
+			infraClusterNamespace:      infraClusterNamespace,
+			infraClusterLabels:         infraClusterLabels,
+			storageClassEnforcement:    storageClassEnforcement,
+			dvProvisioningCheckTimeout: dvProvisioningCheckTimeout,
 		}
 	}
 
