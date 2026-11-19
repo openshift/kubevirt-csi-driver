@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v2"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +35,7 @@ var (
 
 	runNodeService       = flag.Bool("run-node-service", true, "Specifies rather or not to run the node service, the default is true")
 	runControllerService = flag.Bool("run-controller-service", true, "Specifies rather or not to run the controller service, the default is true")
+	dvProvisioningCheckTimeout = flag.Duration("dv-provisioning-check-timeout", 30*time.Second, "How long CreateVolume waits to detect a definitive provisioning failure (e.g. quota exceeded) on the management cluster before returning success optimistically. Must be less than the external-provisioner --timeout value.")
 )
 
 func init() {
@@ -134,7 +136,8 @@ func handle() {
 		storageClassEnforcement,
 		nodeID,
 		*runNodeService,
-		*runControllerService)
+		*runControllerService,
+		*dvProvisioningCheckTimeout)
 
 	driver.Run(*endpoint)
 }
