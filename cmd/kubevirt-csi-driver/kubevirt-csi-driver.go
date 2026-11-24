@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	klog "k8s.io/klog/v2"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	"kubevirt.io/csi-driver/pkg/kubevirt"
 	"kubevirt.io/csi-driver/pkg/service"
@@ -125,9 +126,12 @@ func handle() {
 		if err != nil {
 			klog.Fatal(fmt.Errorf("failed to find node by name %v: %v", nodeName, err))
 		}
-		// systemUUID is the VM ID
-		nodeID = node.Status.NodeInfo.SystemUUID
-		klog.Infof("Node name: %v, Node ID: %s", nodeName, nodeID)
+
+		nodeID, err = resolveNodeID(*nodeName, node.Status.NodeInfo.SystemUUID, node.Annotations, virtClient)
+		if err != nil {
+			klog.Fatal(err)
+		}
+		klog.Infof("Node name: %v, Node ID: %s", *nodeName, nodeID)
 	}
 
 	identityClientset = tenantClientSet
@@ -186,4 +190,37 @@ func parseLabels() map[string]string {
 	}
 
 	return infraClusterLabelsMap
+}
+
+type infraVMGetter interface {
+	GetVirtualMachine(namespace, name string) (*kubevirtv1.VirtualMachineInstance, error)
+}
+
+// resolveNodeID keeps the release-4.15 SystemUUID node-ID mechanism and only
+// falls back to the infra VM annotations when that UUID is unavailable.
+func resolveNodeID(nodeName, systemUUID string, annotations map[string]string, vmGetter infraVMGetter) (string, error) {
+	if systemUUID != "" {
+		return systemUUID, nil
+	}
+
+	var vmName, vmNamespace string
+	if annotations != nil {
+		vmName = annotations["csi.kubevirt.io/infra-vm-name"]
+		vmNamespace = annotations["csi.kubevirt.io/infra-vm-namespace"]
+	}
+	if vmName == "" || vmNamespace == "" {
+		return "", fmt.Errorf("failed to resolve infra VM for node %s: systemUUID missing and vmName or vmNamespace not found. "+
+			"Set annotations 'csi.kubevirt.io/infra-vm-name' and 'csi.kubevirt.io/infra-vm-namespace' on the node. "+
+			"After setting the annotations, restart the kubevirt-csi-node pod on this node for the changes to take effect", nodeName)
+	}
+
+	vmi, err := vmGetter.GetVirtualMachine(vmNamespace, vmName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get infra VM %s/%s for node %s: %w", vmNamespace, vmName, nodeName, err)
+	}
+	if vmi == nil || vmi.Spec.Domain.Firmware == nil || vmi.Spec.Domain.Firmware.UUID == "" {
+		return "", fmt.Errorf("infra VM %s/%s for node %s has no firmware UUID", vmNamespace, vmName, nodeName)
+	}
+
+	return string(vmi.Spec.Domain.Firmware.UUID), nil
 }
