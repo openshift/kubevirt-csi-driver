@@ -67,7 +67,8 @@ var _ = ginkgo.BeforeSuite(func() {
 		storagClassEnforcement,
 		getKey(infraClusterNamespace, nodeID),
 		true,
-		true)
+		true,
+		0) // use defaultDVProvisioningCheckTimeout
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 	go func() {
